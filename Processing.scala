@@ -1,6 +1,8 @@
 package processing
 
+import scala.util.{ Try, Success, Failure }
 import scala.concurrent._
+import ExecutionContext.Implicits.global
 
 sealed trait Input[+I]
 
@@ -27,39 +29,51 @@ object State {
   */
 }
 
-class Consumer[S, I](state: State[S, I])/*(fn: (S, I) => Consumer[S, I])*/ {
+trait Consumer[S, I] {
+
+  def feed(input: I): Consumer[S, I]
+
+  def feedAll(inputs: TraversableOnce[I]): Consumer[S, I]
+
+  def eof: Consumer[S, I]
+
+  def run: S
+
+}
+
+class SyncConsumer[S, I](state: State[S, I]) extends Consumer[S, I] {
 
   def feed(input: I): Consumer[S, I] = state match {
     case State.Continue(process) => process(Input.Element(input))
-    case State.Done(finalState)  => new Consumer(State.Done(finalState))
-    case s: State.Error[S]       => new Consumer(s)
+    case State.Done(finalState)  => new SyncConsumer(State.Done(finalState))
+    case s: State.Error[S]       => new SyncConsumer(s)
   }
 
-  def feedAll(inputs: TraversableOnce[I]): Consumer[S, I] = inputs.foldLeft(this) { (acc, i) =>
+  def feedAll(inputs: TraversableOnce[I]): Consumer[S, I] = inputs.foldLeft(this: Consumer[S, I]) { (acc, i) =>
     acc.feed(i)
   }
 
   def eof: Consumer[S, I] = state match {
     case State.Continue(process) => process(Input.End)
-    case State.Done(finalState)  => new Consumer(State.Done(finalState))
-    case s: State.Error[S]       => new Consumer(s)
+    case State.Done(finalState)  => new SyncConsumer(State.Done(finalState))
+    case s: State.Error[S]       => new SyncConsumer(s)
   }
 
   def run: S = state match {
     case State.Done(finalState) => finalState
     case State.Error(ex)        => throw ex
-    case _: State.Continue => sys.error("consumer not done")
+    case State.Continue(_)      => sys.error("consumer not done")
   }
 
 }
 
-class AsyncConsumer[S, I](state: Future[State[S, I]])/*(fn: (S, I) => Consumer[S, I])*/ {
+class AsyncConsumer[S, I](state: Future[State[S, I]]) extends Consumer[S, I] {
 
-  def feed(input: Future[I]): AsyncConsumer[S, I] = new AsyncConsumer {
-    state.collect {
-      case State.Done(finalState)  => new AsyncConsumer(State.Done(finalState))
-      case s: State.Error[S]       => new AsyncConsumer(s)
-      case State.Continue(process) => process(Input.Element(input))
+  def feed(input: Future[I]): Consumer[S, I] = AsyncConsumer {
+    state.flatMap { 
+      case State.Done(finalState)  => Future { State.Done(finalState) }
+      case s: State.Error[S]       => future(s)
+      case State.Continue(process) =>
         val c = promise[State[S, I]]
 
         input.onComplete {
@@ -75,9 +89,9 @@ class AsyncConsumer[S, I](state: Future[State[S, I]])/*(fn: (S, I) => Consumer[S
     acc.feed(i)
   }
 
-  def feedMAll(inputs: TraversableOnce[Future[I]])
+  def feedMAll(inputs: TraversableOnce[Future[I]]) = { }
 
-  def feedAllM(inputs: Future[TraversableOnce[I]])
+  def feedAllM(inputs: Future[TraversableOnce[I]]) = { }
 
   def eof: Consumer[S, I] = state match {
     case State.Continue(process) => process(Input.End)
@@ -90,6 +104,12 @@ class AsyncConsumer[S, I](state: Future[State[S, I]])/*(fn: (S, I) => Consumer[S
     case State.Error(ex)        => throw ex
     case _: State.Continue => sys.error("consumer not done")
   }
+
+}
+
+object AsyncConsumer {
+
+  def apply[S, I](state: Future[State[S, I]]) = new AsyncConsumer(state)
 
 }
 
