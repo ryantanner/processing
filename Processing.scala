@@ -55,23 +55,29 @@ class Consumer[S, I](state: State[S, I])/*(fn: (S, I) => Consumer[S, I])*/ {
 
 class AsyncConsumer[S, I](state: Future[State[S, I]])/*(fn: (S, I) => Consumer[S, I])*/ {
 
-  def feed(input: Future[I]): AsyncConsumer[S, I] = state.collect {
-    case State.Done(finalState)  => new Consumer(State.Done(finalState))
-    case s: State.Error[S]       => new Consumer(s)
-    case State.Continue(process) => process(Input.Element(input))
-      val c = promise[State[S, I]]
+  def feed(input: Future[I]): AsyncConsumer[S, I] = new AsyncConsumer {
+    state.collect {
+      case State.Done(finalState)  => new AsyncConsumer(State.Done(finalState))
+      case s: State.Error[S]       => new AsyncConsumer(s)
+      case State.Continue(process) => process(Input.Element(input))
+        val c = promise[State[S, I]]
 
-      input.onComplete {
-        case Success(i) => c.success(process(Input.Element(i)))
-        case Failure(ex) => c.success(Input.Error(ex))
-      }
+        input.onComplete {
+          case Success(i) => c.success(process(Input.Element(i)))
+          case Failure(ex) => c.success(process(Input.Error(ex)))
+        }
 
-      new AsyncConsumer(c.future)
+        c.future
+    }
   }
 
   def feedAll(inputs: TraversableOnce[I]): Consumer[S, I] = inputs.foldLeft(this) { (acc, i) =>
     acc.feed(i)
   }
+
+  def feedMAll(inputs: TraversableOnce[Future[I]])
+
+  def feedAllM(inputs: Future[TraversableOnce[I]])
 
   def eof: Consumer[S, I] = state match {
     case State.Continue(process) => process(Input.End)
